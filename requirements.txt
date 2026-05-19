@@ -1,6 +1,10 @@
 streamlit
-google-generativeai
 langchain
+langchain-core
 langchain-community
+langchain-google-genai
 faiss-cpu
 sentence-transformers
+spacy
+nltk
+numpy

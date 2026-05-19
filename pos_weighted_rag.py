@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 
 import spacy
-import google.generativeai as genai
 from langchain_core.documents import Document
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 
 @dataclass
@@ -17,11 +17,11 @@ class PipelineConfig:
     bm25_k1: float = 1.5
     bm25_b: float = 0.75
 
-    enable_expansion: bool = True
+    enable_expansion: bool = False
     expansion_topk: int = 2
 
-    gemini_model: str = "gemini-1.5-flash"
-    max_output_tokens: int = 1024
+    gemini_model: str = "gemini-2.5-flash"
+    max_output_tokens: Optional[int] = None
     temperature: float = 0.2
     top_p: float = 0.85
     max_context_chars: int = 3000
@@ -61,12 +61,16 @@ def _lemmatized_tokenize(text: str) -> List[str]:
     return tokens
 
 
+def _corpus_tokenize(text: str) -> List[str]:
+    return _tech_tokenize(text.lower())
+
+
 class HandRolledBM25:
     def __init__(self, docs: List[Document], k1: float = 1.5, b: float = 0.75):
         self.docs = docs
         self.k1 = k1
         self.b = b
-        self.corpus = [_lemmatized_tokenize(d.page_content) for d in docs]
+        self.corpus = [_corpus_tokenize(d.page_content) for d in docs]
         self.N = len(self.corpus)
 
         if self.N:
@@ -116,7 +120,10 @@ class HandRolledBM25:
         return [(self.docs[i], score) for i, score in scores[:k]]
 
 
-nlp = spacy.load("en_core_web_sm")
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    nlp = spacy.blank("en")
 
 _POS_SCORE_BOOST: Dict[str, float] = {
     "PROPN": 2.2,
@@ -197,8 +204,13 @@ def pos_weighted_query_tokens(query: str) -> Dict[str, float]:
         if token.ent_type_:
             boost *= 1.3
 
-        for term in _tech_tokenize(token.lemma_):
+        base_term = token.lemma_ if token.lemma_ else token.text
+        for term in _tech_tokenize(base_term):
             result[term] = max(result.get(term, 1.0), boost)
+
+    if not result:
+        for term in _tech_tokenize(query):
+            result[term] = 1.0
 
     return result
 
@@ -234,10 +246,7 @@ class PromptBuilder:
 A student has asked you a question.
 
 Read the provided book excerpts carefully.
-Use ONLY the information in the excerpts to answer the student's question.
-If the answer is not contained in the excerpts, politely inform the student that you
-have not found that information in the Restricted Section.
-Do not make up facts outside of the provided text.
+If not found in book answer the question using your knowledge on harry potter world and do not mention in the answer that it is not found in the given passage.
 
 STUDENT QUESTION: {query}
 
@@ -250,23 +259,45 @@ Answer the student now in a magical tone:"""
 class GeminiGenerator:
     def __init__(self, cfg: PipelineConfig):
         self.cfg = cfg
-        genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
-        self.model = genai.GenerativeModel(cfg.gemini_model)
+        self.call_count = 0
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise EnvironmentError("GOOGLE_API_KEY or GEMINI_API_KEY must be set.")
+        model_kwargs = {
+            "model": cfg.gemini_model,
+            "temperature": cfg.temperature,
+            "top_p": cfg.top_p,
+            "google_api_key": api_key,
+            "max_retries": 0,
+        }
+        if cfg.max_output_tokens is not None:
+            model_kwargs["max_output_tokens"] = cfg.max_output_tokens
+
+        self.model = ChatGoogleGenerativeAI(
+            **model_kwargs,
+        )
 
     def generate(self, prompt: str) -> str:
         try:
-            response = self.model.generate_content(
-                prompt,
-                generation_config={
-                    "max_output_tokens": self.cfg.max_output_tokens,
-                    "temperature": self.cfg.temperature,
-                    "top_p": self.cfg.top_p,
-                },
+            self.call_count += 1
+            response = self.model.invoke(prompt)
+            return str(response.content).strip()
+        except Exception as exc:
+            message = str(exc)
+            quota_markers = (
+                "RESOURCE_EXHAUSTED",
+                "429",
+                "quota",
+                "rate limit",
             )
-
-            return response.text.strip()
-        except Exception as e:
-            return f"Alas, a magical disturbance blocked my vision! (Error: {str(e)})"
+            if any(marker.lower() in message.lower() for marker in quota_markers):
+                return (
+                    "Gemini could not generate an answer because the API quota "
+                    "for this key has been exhausted. Please check your Gemini "
+                    "usage or billing, then try again. The retrieved source "
+                    "passages are still shown below."
+                )
+            return f"Generation failed: {message}"
 
 
 def chunk_text(text: str, chunk_size: int = 800, overlap: int = 120) -> List[str]:
@@ -332,6 +363,7 @@ class RAGResult:
     prompt: str
     answer: str
     latency_ms: Dict[str, float] = field(default_factory=dict)
+    generation_call_count: int = 0
 
 
 class RAGPipeline:
@@ -348,6 +380,7 @@ class RAGPipeline:
 
     def query(self, raw_query: str) -> RAGResult:
         latency = {}
+        start_call_count = self.generator.call_count
 
         t0 = time.perf_counter()
         expanded_query = expand_query(raw_query, self.cfg)
@@ -374,4 +407,5 @@ class RAGPipeline:
             prompt=prompt,
             answer=answer,
             latency_ms=latency,
+            generation_call_count=self.generator.call_count - start_call_count,
         )

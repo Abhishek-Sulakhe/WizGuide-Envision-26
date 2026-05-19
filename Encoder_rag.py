@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 from sentence_transformers import CrossEncoder
 
 # ──────────────────────────────────────────────
@@ -28,7 +29,7 @@ class PipelineConfig:
     bm25_b:            float = 0.75  # doc length normalization
     enable_expansion:  bool  = True
     expansion_topk:    int   = 2     # how many synonyms to inject per PROPN
-    gemini_model:      str   = "gemini-1.5-flash"
+    gemini_model:      str   = "gemini-2.0-flash"
     max_output_tokens: int   = 1024
     temperature:       float = 0.2     # low = factual, deterministic answers
     top_p:             float = 0.85
@@ -106,7 +107,10 @@ class HandRolledBM25:
 # of token repetition (the old approach was hacky)
 # ──────────────────────────────────────────────
 
-nlp = spacy.load("en_core_web_sm")
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    nlp = spacy.blank("en")
 
 # Maps POS → score multiplier applied to BM25 hits per term
 _POS_SCORE_BOOST: Dict[str, float] = {
@@ -268,7 +272,6 @@ Answer questions strictly based on the provided sources.
 # GEMINI GENERATOR
 # ──────────────────────────────────────────────
 
-import google.generativeai as genai
 import os
 
 class GeminiGenerator:
@@ -279,37 +282,25 @@ class GeminiGenerator:
     """
 
     def __init__(self, cfg: PipelineConfig):
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not api_key:
             raise EnvironmentError(
-                "GEMINI_API_KEY not set. Export it before starting the server."
+                "GOOGLE_API_KEY or GEMINI_API_KEY must be set before starting the app."
             )
-
-        genai.configure(api_key=api_key)
-
-        self.model = genai.GenerativeModel(
-            model_name=cfg.gemini_model,
-            generation_config=genai.GenerationConfig(
-                max_output_tokens=cfg.max_output_tokens,
-                temperature=cfg.temperature,
-                top_p=cfg.top_p,
-            )
+        self.model = ChatGoogleGenerativeAI(
+            model=cfg.gemini_model,
+            temperature=cfg.temperature,
+            max_output_tokens=cfg.max_output_tokens,
+            top_p=cfg.top_p,
+            google_api_key=api_key,
         )
 
     def generate(self, prompt: str) -> str:
         try:
-            response = self.model.generate_content(prompt)
-
-            # Gemini sometimes blocks responses on safety grounds —
-            # surface that clearly instead of returning empty string
-            if not response.candidates:
-                return "Response blocked by safety filter."
-
-            return response.text.strip()
+            response = self.model.invoke(prompt)
+            return str(response.content).strip()
 
         except Exception as e:
-            # don't crash the whole request — return the error as the answer
-            # so the retrieved docs still get returned to the caller
             return f"Generation failed: {str(e)}"
         
 # ──────────────────────────────────────────────
