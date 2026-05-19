@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 
+
 # ── Page config (must be first Streamlit call) ──────────────────
 st.set_page_config(
     page_title="WizGuide ⚡",
