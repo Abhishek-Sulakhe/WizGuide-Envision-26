@@ -1,5 +1,10 @@
 import streamlit as st
 import os
+from pos_weighted_rag import (
+    PipelineConfig,
+    RAGPipeline,
+    load_and_chunk_docs,
+)
 
 
 # ── Page config (must be first Streamlit call) ──────────────────
@@ -46,6 +51,33 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+@st.cache_resource
+def load_pipeline(api_key: str, num_chunks: int):
+    os.environ["GOOGLE_API_KEY"] = api_key
+
+    docs = load_and_chunk_docs("data", chunk_size=800)
+
+    cfg = PipelineConfig(
+        top_k_matches=num_chunks,
+        enable_expansion=True,
+    )
+
+    return RAGPipeline(docs, cfg)
+
+
+def get_answer(question: str, api_key: str, num_chunks: int = 3):
+    pipeline = load_pipeline(api_key, num_chunks)
+    result = pipeline.query(question)
+
+    sources = [
+        f"Source: {doc.metadata.get('source', 'Unknown')}, "
+        f"chunk {doc.metadata.get('chunk_index', '?')}\n\n"
+        f"{doc.page_content}"
+        for doc in result.retrieved_docs
+    ]
+
+    return result.answer, sources
 
 # ── Sidebar ──────────────────────────────────────────────────────
 with st.sidebar:
@@ -139,7 +171,7 @@ if user_input:
     with st.chat_message("assistant"):
         with st.spinner("🔮 Consulting the Wizarding archives..."):
             try:
-                # ── PLACEHOLDER: Replace this block with real RAG ──────
+                
                 # When your teammate builds the backend, import and call:
                 #   from backend.rag import get_answer
                 #   answer, sources = get_answer(user_input, num_chunks)
@@ -150,16 +182,8 @@ if user_input:
                     sources = []
                 else:
                     # STUB — replace with real RAG call
-                    answer = (f"🪄 *[RAG backend not yet connected]*\n\n"
-                              f"You asked: **{user_input}**\n\n"
-                              f"Once the backend is connected, a real "
-                              f"answer will appear here using {num_chunks} "
-                              f"retrieved chunks from the HP dataset.")
-                    sources = [
-                        "Sample chunk 1: Harry Potter is a wizard...",
-                        "Sample chunk 2: Hogwarts is a school..."
-                    ]
-                # ── END PLACEHOLDER ────────────────────────────────────
+                    answer,sources = get_answer(user_input, api_key, num_chunks)
+                
                 
                 st.markdown(answer)
                 if sources and show_sources:
