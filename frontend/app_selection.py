@@ -63,7 +63,7 @@ def load_pos_pipeline(api_key: str, num_chunks: int):
     docs = pos_weighted_rag.load_and_chunk_docs("data", chunk_size=800)
 
     cfg = pos_weighted_rag.PipelineConfig(
-        top_k_matches=num_chunks,
+        top_k_rerank=num_chunks,
         enable_expansion=True,
     )
 
@@ -77,7 +77,7 @@ def load_encoder_pipeline(api_key: str, num_chunks: int):
     docs = enc_rag.load_and_chunk_docs("data", chunk_size=800)
 
     cfg = enc_rag.PipelineConfig(
-        top_k_matches=num_chunks,
+        top_k_rerank=num_chunks,
     )
 
     return enc_rag.RAGPipeline(docs, cfg)
