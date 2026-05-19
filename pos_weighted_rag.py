@@ -27,6 +27,7 @@ class PipelineConfig:
     max_context_chars: int = 3000
 
 
+
 def _tech_tokenize(text: str) -> List[str]:
     text = re.sub(r"[^\w\s/_-]", " ", text)
     raw = text.split()
@@ -41,13 +42,31 @@ def _tech_tokenize(text: str) -> List[str]:
 
     return expanded
 
+def _lemmatized_tokenize(text: str) -> List[str]:
+    doc = nlp(text)
+    tokens = []
+
+    for token in doc:
+        if token.is_space or token.is_punct:
+            continue
+
+        lemma = token.lemma_.lower().strip()
+
+        if not lemma:
+            continue
+
+        for term in _tech_tokenize(lemma):
+            tokens.append(term)
+
+    return tokens
+
 
 class HandRolledBM25:
     def __init__(self, docs: List[Document], k1: float = 1.5, b: float = 0.75):
         self.docs = docs
         self.k1 = k1
         self.b = b
-        self.corpus = [_tech_tokenize(d.page_content) for d in docs]
+        self.corpus = [_lemmatized_tokenize(d.page_content) for d in docs]
         self.N = len(self.corpus)
 
         if self.N:
@@ -178,7 +197,7 @@ def pos_weighted_query_tokens(query: str) -> Dict[str, float]:
         if token.ent_type_:
             boost *= 1.3
 
-        for term in _tech_tokenize(token.text):
+        for term in _tech_tokenize(token.lemma_):
             result[term] = max(result.get(term, 1.0), boost)
 
     return result
